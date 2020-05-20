@@ -38,7 +38,6 @@ fn main() -> Result<(), io::Error> {
 
     // Set up stop signal
     let running = Arc::new(AtomicBool::new(true));
-    let run_measurements = running.clone();
     let run_render_loop = running.clone();
 
     // Handle Ctrl-c
@@ -55,7 +54,7 @@ fn main() -> Result<(), io::Error> {
     let data = Arc::new(Mutex::new(Data::new(DATA_CAPACITY)));
     let measurement_data = data.clone();
     thread::spawn(move || {
-        while run_measurements.load(Ordering::SeqCst) {
+        loop {
             // Do measurements
             let normal = sht.measure(PowerMode::NormalMode).unwrap();
             let lowpwr = sht.measure(PowerMode::LowPower).unwrap();
