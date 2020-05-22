@@ -30,6 +30,9 @@ embedded-hal-mock = "0.7.1"
 linux-embedded-hal = "0.3"
 termion = "1.5"
 tui = "0.8"
+smol = "0.4.0"
+ctrlc = "3.1.4"
+futures-micro = "0.3.1"
 
 [profile.release]
 lto = true
