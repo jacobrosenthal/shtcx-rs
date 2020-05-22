@@ -1,14 +1,12 @@
 //! Monitor an SHTC3 sensor on Linux in the terminal.
 
+use futures::prelude::*;
+use linux_embedded_hal::{Delay, I2cdev};
+use piper::{Receiver, Sender};
+use shtcx::{self, Measurement, PowerMode};
 use std::collections::VecDeque;
 use std::io::{self, Stdout};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc::channel, Arc};
-use std::thread;
 use std::time::Duration;
-
-use linux_embedded_hal::{Delay, I2cdev};
-use shtcx::{self, PowerMode};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::{IntoRawMode, RawTerminal};
@@ -18,59 +16,51 @@ use tui::style::{Color, Style};
 use tui::widgets::{Axis, Block, Borders, Chart, Dataset, Marker, Widget};
 use tui::{Frame, Terminal};
 
-const SENSOR_REFRESH_DELAY: Duration = Duration::from_millis(50);
-const UI_REFRESH_DELAY: Duration = Duration::from_millis(25);
 const DATA_CAPACITY: usize = 100;
 
-fn main() -> Result<(), io::Error> {
-    // Set up stop signal
-    let running = Arc::new(AtomicBool::new(true));
-    let run_render_loop = running.clone();
-
-    // Handle Ctrl-c
-    thread::spawn(move || {
-        for key in io::stdin().keys() {
-            if let Ok(Key::Ctrl('c')) = key {
-                running.store(false, Ordering::SeqCst);
-                break;
+fn main() {
+    smol::run(async {
+        // Handle Ctrl-c
+        let ctrl_c = smol::Task::blocking(async move {
+            for key in io::stdin().keys() {
+                if let Ok(Key::Ctrl('c')) = key {
+                    break;
+                }
             }
-        }
-    });
+        });
 
-    // Launch measurement thread
+        // Initialize terminal app
+        let stdout = io::stdout().into_raw_mode().unwrap();
+        let backend = TermionBackend::new(stdout);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // // Prepare terminal
+        terminal.clear().unwrap();
+        terminal.hide_cursor().unwrap();
+
+        //the only thing that CAN return is ctrlc, everthing else loops
+        let (sender, receiver) = piper::chan(1000);
+        futures::select! {
+            _ = ctrl_c.fuse() => (),
+            _ = poll(sender).fuse() => (),
+            _ = show(receiver, &mut terminal).fuse()=> (),
+        };
+
+        // Reset terminal
+        let _ = terminal.clear();
+        let _ = terminal.show_cursor();
+    });
+}
+
+async fn show(
+    receiver: Receiver<(Measurement, Measurement)>,
+    terminal: &mut Terminal<TermionBackend<RawTerminal<Stdout>>>,
+) {
     let mut data = Data::new(DATA_CAPACITY);
-    let (sender, receiver) = channel();
-    thread::spawn(move || {
-        // Initialize sensor driver
-        let dev = I2cdev::new("/dev/i2c-1").unwrap();
-        let mut sht = shtcx::shtc3(dev, Delay);
 
-        loop {
-            // Do measurements
-            let normal = sht.measure(PowerMode::NormalMode).unwrap();
-            let lowpwr = sht.measure(PowerMode::LowPower).unwrap();
-
-            // Send measurements over
-            sender.send((normal, lowpwr)).unwrap();
-
-            // Sleep
-            thread::sleep(SENSOR_REFRESH_DELAY);
-        }
-    });
-
-    // Initialize terminal app
-    let stdout = io::stdout().into_raw_mode()?;
-    let backend = TermionBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Prepare terminal
-    terminal.clear().unwrap();
-    terminal.hide_cursor().unwrap();
-
-    // Render loop
-    while run_render_loop.load(Ordering::SeqCst) {
+    loop {
         // Drain any data updating the buffer
-        for (normal, lowpwr) in receiver.try_iter() {
+        for (normal, lowpwr) in receiver.try_recv() {
             data.temp_normal
                 .push_front(normal.temperature.as_millidegrees_celsius());
             data.temp_lowpwr
@@ -82,16 +72,28 @@ fn main() -> Result<(), io::Error> {
         }
 
         data.truncate();
-        render(&mut terminal, &data);
+        render(terminal, &data);
 
-        thread::sleep(UI_REFRESH_DELAY);
+        async_std::task::sleep(Duration::from_millis(25)).await;
     }
+}
 
-    // Reset terminal
-    let _ = terminal.clear();
-    let _ = terminal.show_cursor();
+async fn poll(sender: Sender<(Measurement, Measurement)>) {
+    // Initialize sensor driver
+    let dev = I2cdev::new("/dev/i2c-17").unwrap();
+    let mut sht = shtcx::shtc3(dev, Delay);
 
-    Ok(())
+    loop {
+        // Do measurements
+        let normal = sht.measure(PowerMode::NormalMode).unwrap();
+        let lowpwr = sht.measure(PowerMode::LowPower).unwrap();
+
+        // Send measurements over
+        sender.send((normal, lowpwr)).await;
+
+        // Sleep
+        async_std::task::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[derive(Default)]
